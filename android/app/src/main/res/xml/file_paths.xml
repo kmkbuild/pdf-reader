@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PLACE THIS FILE AT:
+  android/app/src/main/res/xml/file_paths.xml
+  (Create the xml folder if it doesn't exist)
+
+  This enables FileProvider to share files from these locations.
+  Required for opening PDFs from external file managers.
+-->
+<paths>
+    <external-path name="external_files" path="." />
+    <external-cache-path name="external_cache" path="." />
+    <cache-path name="cache" path="." />
+    <files-path name="files" path="." />
+</paths>
