@@ -337,47 +337,71 @@ export default function App() {
     restore();
   }, []);
 
-  // ── FIX 3: BACK BUTTON — proper history stack management ─────────────────
-  // Root cause: popstate fired with stale closure values, and history ran out
-  // after first press. Fix: use refs (always fresh), re-push state after each
-  // back action so there's always something in the history stack.
+  // ── BACK BUTTON — Capacitor Android fix ──────────────────────────────────
+  // ROOT CAUSE: Capacitor does NOT fire 'popstate' on Android back press.
+  // It fires 'backbutton' on document. popstate = browser only. Never worked.
+  // FIX: Listen to 'backbutton' (Capacitor/Cordova) AND 'popstate' (browser).
+  // Uses refs so handler is never stale — registered once, works forever.
   useEffect(() => {
-    // Push initial state so back button has something to intercept
+    // For browser fallback — push state so popstate has something to catch
     window.history.pushState({ page: 1 }, "");
 
     const handleBack = (e) => {
-      // Always re-push so the next back press is also intercepted
-      window.history.pushState({ page: 1 }, "");
+      // Prevent default Android back behaviour (which exits the app)
+      if (e && e.preventDefault) e.preventDefault();
+      if (e && e.detail && e.detail.register) {
+        // Capacitor's backbutton event — must call register to claim it
+        e.detail.register(10, () => handleNavigation());
+        return;
+      }
+      handleNavigation();
+    };
 
-      // Priority order for back navigation
+    const handleNavigation = () => {
+      // Re-push for browser popstate (keeps history alive)
+      try { window.history.pushState({ page: 1 }, ""); } catch {}
+
+      // Priority: drawer → panel → reader → minimize
       if (drawerOpenRef.current) {
-        // 1. Close drawer first
         setDrawerOpen(false);
         return;
       }
       if (activePanelRef.current) {
-        // 2. Close any open panel
         setActivePanel(null);
         return;
       }
       if (screenRef.current === "reader") {
-        // 3. Go back to library from reader
         setScreen("home");
         setTab("home");
         setPdfDoc(null);
         stopVoice();
         return;
       }
-      // 4. On home screen — exit app (on Android, minimize rather than kill)
-      if (window.Capacitor?.isNativePlatform?.()) {
-        window.Capacitor.Plugins?.App?.minimizeApp?.();
-      }
-      // On web — do nothing (can't exit browser)
+      // On home — minimize app instead of exiting
+      try {
+        // Capacitor App plugin
+        if (window.Capacitor?.Plugins?.App) {
+          window.Capacitor.Plugins.App.minimizeApp();
+          return;
+        }
+      } catch {}
+      // Android WebView fallback
+      try { window.history.go(-1); } catch {}
     };
 
-    window.addEventListener("popstate", handleBack);
-    return () => window.removeEventListener("popstate", handleBack);
-  }, []); // Empty deps — uses refs, never goes stale
+    // Capacitor Android fires this on document
+    document.addEventListener("backbutton", handleBack, false);
+    // Capacitor v3+ fires this
+    document.addEventListener("ionBackButton", handleBack, false);
+    // Browser fallback
+    window.addEventListener("popstate", handleNavigation);
+
+    return () => {
+      document.removeEventListener("backbutton", handleBack, false);
+      document.removeEventListener("ionBackButton", handleBack, false);
+      window.removeEventListener("popstate", handleNavigation);
+    };
+  }, []); // Empty deps — safe because we use refs
 
   // ── FIX 2: AUTO-SAVE — only runs after restore is complete ─────────────────
   useEffect(() => {
