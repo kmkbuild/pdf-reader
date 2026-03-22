@@ -477,14 +477,19 @@ export default function App() {
 
   // FIX 2: Remount the input element by changing its key — guarantees
   // onChange always fires even when same file is selected again
+  // Use a ref flag to prevent double-trigger (onTouchEnd + onClick both fire on mobile)
+  const filePickerBusy = useRef(false);
   const triggerFilePicker = () => {
-    setFileKey(k => k + 1); // triggers remount
-    // Use setTimeout so React re-renders the new input before we click it
-    setTimeout(() => fileInputRef.current?.click(), 50);
+    if (filePickerBusy.current) return;
+    filePickerBusy.current = true;
+    setTimeout(() => { filePickerBusy.current = false; }, 800);
+    setFileKey(k => k + 1); // triggers remount of input element
+    // 100 ms gives React time to re-render the new input before we .click() it
+    setTimeout(() => fileInputRef.current?.click(), 100);
   };
   const triggerFolderPicker = () => {
     setScanKey(k => k + 1);
-    setTimeout(() => folderInputRef.current?.click(), 50);
+    setTimeout(() => folderInputRef.current?.click(), 100);
   };
 
   const handleFiles = async (files) => {
@@ -789,17 +794,23 @@ export default function App() {
   const detectLanguage = (text) => {
     if (!text || text.trim().length < 10) return "en";
     const s = text.slice(0, 500);
+    // Compare against NON-WHITESPACE chars so spaces don't dilute the ratio
+    const nonSpace = (s.replace(/\s/g, '').length) || 1;
     const counts = {
-      urdu:   (s.match(/[\u0600-\u06FF]/g)||[]).length,
+      arabic: (s.match(/[\u0600-\u06FF]/g)||[]).length,
       hindi:  (s.match(/[\u0900-\u097F]/g)||[]).length,
       chinese:(s.match(/[\u4E00-\u9FFF]/g)||[]).length,
       french: (s.match(/[àâçéèêëîïôùûüÿæœ]/gi)||[]).length,
     };
-    const t = s.length;
-    if (counts.urdu   / t > 0.12) return "ur";
-    if (counts.hindi  / t > 0.12) return "hi";
-    if (counts.chinese/ t > 0.12) return "zh";
-    if (counts.french / t > 0.04) return "fr";
+    // Threshold: 5% of non-space chars (was 12% of all chars — too strict for PDFs)
+    if (counts.arabic  / nonSpace > 0.05) {
+      // Urdu-specific letters: ٹ ڈ ڑ ں ھ ہ ۃ ے ی (not present in pure Arabic)
+      const urduOnly = (s.match(/[\u0679\u0688\u0691\u06BA\u06BE\u06C1\u06C3\u06D2\u06CC]/g)||[]).length;
+      return urduOnly > 0 ? "ur" : "ar";
+    }
+    if (counts.hindi   / nonSpace > 0.05) return "hi";
+    if (counts.chinese / nonSpace > 0.05) return "zh";
+    if (counts.french  / nonSpace > 0.02) return "fr";
     return "en";
   };
 
@@ -829,7 +840,12 @@ export default function App() {
 
   const startVoice = async () => {
     if (!pdfDoc) return;
-    // Reload voices if not yet loaded
+    // Hard check — some Android WebViews don't have speechSynthesis at all
+    if (!('speechSynthesis' in window)) {
+      toast_("Voice reading is not supported in this browser. Try Chrome.");
+      return;
+    }
+    // Reload voices if not yet loaded (Android loads them async)
     if (!voicesLoadedRef.current || voices.length === 0) {
       const v = window.speechSynthesis?.getVoices() || [];
       if (v.length > 0) { setVoices(v); voicesLoadedRef.current = true; }
@@ -845,19 +861,29 @@ export default function App() {
       utter.rate  = voiceSpeed;
       utter.pitch = 1;
       utter.lang  = langLocale[lang] || "en-US";
+      // Get latest voice list — don't block speech if list is still empty
       const allV  = window.speechSynthesis?.getVoices() || voices;
-      const best  = findVoice(lang, voiceGender, allV);
-      if (best) utter.voice = best;
+      if (allV.length > 0) {
+        const best = findVoice(lang, voiceGender, allV);
+        if (best) utter.voice = best;
+      }
       utter.onstart    = () => setVoicePlaying(true);
       utter.onend      = () => { setVoicePlaying(false); setVoiceProgress(0); };
-      utter.onerror    = e  => { setVoicePlaying(false); setVoiceProgress(0); if (e.error!=="interrupted") toast_("Voice error: " + e.error); };
+      utter.onerror    = e  => {
+        setVoicePlaying(false); setVoiceProgress(0);
+        if (e.error === "synthesis-unavailable" || e.error === "audio-hardware-unavailable") {
+          toast_("TTS engine not installed. Go to Android Settings → Accessibility → Text-to-speech and install a TTS engine.");
+        } else if (e.error !== "interrupted" && e.error !== "canceled") {
+          toast_("Voice error: " + e.error);
+        }
+      };
       utter.onboundary = e  => { if (e.name==="word") setVoiceProgress(e.charIndex/text.length); };
       utterRef.current = utter;
       // Small delay needed on Android WebView before speak() fires reliably
       setTimeout(() => { if (utterRef.current===utter) window.speechSynthesis.speak(utter); }, 120);
     } catch (err) {
       console.error("Voice:", err);
-      toast_("Voice reading not available on this device.");
+      toast_("Voice reading failed. Check that TTS is enabled in your device settings.");
     }
   };
   const stopVoice = () => {
@@ -898,8 +924,10 @@ export default function App() {
         type="file" accept=".pdf,application/pdf"
         multiple style={{ display:"none" }}
         onChange={e=>handleFiles(e.target.files)} />
+      {/* FIX: NO accept attribute on folder input — some Android WebViews filter
+           files before JS sees them, causing missing PDFs. Filter in handleFolderInput instead. */}
       <input key={`folder-${scanKey}`} ref={folderInputRef}
-        type="file" accept=".pdf"
+        type="file"
         multiple webkitdirectory="" mozdirectory=""
         style={{ display:"none" }} onChange={handleFolderInput} />
 
@@ -944,10 +972,10 @@ export default function App() {
               Allow PDF Reader to find all PDFs on your device automatically
             </div>
             {[
-              {n:"1",t:"Tap \"Scan Storage\" below"},
-              {n:"2",t:"A file browser will open"},
-              {n:"3",t:"Navigate to Internal Storage (root)"},
-              {n:"4",t:"Tap any PDF or select all — app saves them all"},
+              {n:"1",t:"Tap \"Scan All PDFs\" below"},
+              {n:"2",t:"A file browser opens — navigate to Internal Storage"},
+              {n:"3",t:"Select any PDF or tap the folder then \"Use This Folder\""},
+              {n:"4",t:"No storage permission needed — the file picker handles it"},
             ].map((s,i)=>(
               <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:12 }}>
                 <div style={{ width:24, height:24, borderRadius:"50%", flexShrink:0,
@@ -1252,7 +1280,7 @@ export default function App() {
                 onMouseDown={()=>setPlusPressed(true)}
                 onMouseUp={()=>setPlusPressed(false)}
                 onTouchStart={()=>setPlusPressed(true)}
-                onTouchEnd={()=>{ setPlusPressed(false); triggerFilePicker(); }}
+                onTouchEnd={(e)=>{ e.preventDefault(); setPlusPressed(false); triggerFilePicker(); }}
                 onClick={()=>triggerFilePicker()}
                 style={{ marginBottom:22,
                   width:plusPressed?46:52, height:plusPressed?46:52, // FIX v: smaller
@@ -1550,6 +1578,24 @@ export default function App() {
                   <>
                     <PanelTitle title="🎧 Voice Reader" tx={tx} />
 
+                    {/* TTS not supported at all */}
+                    {'speechSynthesis' in window === false ? (
+                      <div style={{ textAlign:"center", padding:"24px 16px",
+                        background:"rgba(239,68,68,0.08)", borderRadius:16,
+                        border:"1px solid rgba(239,68,68,0.25)" }}>
+                        <div style={{ fontSize:36, marginBottom:12 }}>🔇</div>
+                        <div style={{ fontSize:14, fontWeight:700, color:"#f87171", marginBottom:8 }}>
+                          Voice Reading Not Available
+                        </div>
+                        <div style={{ fontSize:12, color:txM, lineHeight:1.8 }}>
+                          Your browser doesn't support Text-to-Speech.<br/>
+                          Please use <strong style={{color:C.neonL}}>Google Chrome</strong> for voice reading.<br/>
+                          Also make sure a TTS engine is installed in:<br/>
+                          <strong style={{color:C.neonL}}>Settings → Accessibility → Text-to-speech</strong>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
                     {/* Language detected + gender toggle */}
                     <div style={{ display:"flex", alignItems:"center",
                       justifyContent:"space-between", marginBottom:16,
@@ -1628,10 +1674,15 @@ export default function App() {
                       </div>
                     </div>
                     {/* Available voices count */}
-                    <div style={{ textAlign:"center", marginTop:12, fontSize:10, color:C.txD }}>
-                      {voices.length} voice{voices.length!==1?"s":""} available on this device
+                    <div style={{ textAlign:"center", marginTop:12, fontSize:10,
+                      color: voices.length === 0 ? "#f87171" : C.txD }}>
+                      {voices.length === 0
+                        ? "⚠️ No TTS voices found. Install a TTS engine in Settings → Accessibility → Text-to-speech"
+                        : `${voices.length} voice${voices.length!==1?"s":""} available`}
                     </div>
-                  </>
+                      </>
+                    )}
+                  </> 
                 )}
 
                 {/* NOTES */}
