@@ -26,7 +26,7 @@ jobs:
         run: npm run build
 
       - name: Install Capacitor
-        run: npm install @capacitor/core@6 @capacitor/android@6 @capacitor/cli@6
+        run: npm install @capacitor/core@6 @capacitor/android@6 @capacitor/app@6 @capacitor/cli@6
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -40,8 +40,11 @@ jobs:
       - name: Accept Android licenses
         run: yes | sdkmanager --licenses || true
 
-      - name: Add Android platform
-        run: npx cap add android
+      - name: Add Android platform only if not exists
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
 
       - name: Sync Capacitor
         run: npx cap sync android
