@@ -575,7 +575,9 @@ export default function App() {
 
     setCurrentPage(resumePage);
     setNumPages(doc.numPages);
-    setPdfDoc(doc);
+    setPdfDoc(doc);setTimeout(() => {
+  renderPage(doc, resumePage);
+}, 150);
     try { setToc(flattenOutline(await doc.getOutline())); } catch { setToc([]); }
     setScreen("reader");
     setShowControls(true);
