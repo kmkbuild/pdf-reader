@@ -371,11 +371,6 @@ export default function App() {
     if (!restoredRef.current) return;
     Object.entries(notes).forEach(([n,p]) => dbSaveNotes(n,p).catch(()=>{}));
   }, [notes]);
-  useEffect(() => {
-  if (pdfDoc) {
-    renderPage(pdfDoc, currentPage);
-  }
-}, [currentPage, zoom]);
   useEffect(() => { if (restoredRef.current) dbSet("lastRead",lastRead).catch(()=>{}); }, [lastRead]);
   useEffect(() => { if (restoredRef.current) dbSet("recentBooks",recentBooks).catch(()=>{}); }, [recentBooks]);
   useEffect(() => { if (restoredRef.current) dbSet("dark",dark).catch(()=>{}); }, [dark]);
@@ -606,7 +601,7 @@ useEffect(() => {
   const renderPage = useCallback(async (doc, pageNum, scaleOvr) => {
     if (!canvasRef.current || !doc) return;
     if (renderTaskRef.current) { try { renderTaskRef.current.cancel(); } catch {} }
-    setRendering(true);
+    if (!renderTaskRef.current) setRendering(true);
     try {
       const page = await doc.getPage(pageNum);
 
@@ -1872,15 +1867,17 @@ function BookCard({ book, hue, thumb, lastPage, bms, onOpen, onAction, actionLab
   return (
     <div style={{
       width: gridMode ? "100%" : 108,
+      aspectRatio: gridMode ? "3 / 4" : undefined,
       flexShrink: gridMode ? undefined : 0,
       position:"relative",
       animation: gridMode ? "fadeIn .3s ease both" : undefined,
       cursor:"pointer",
+      transition: "transform 0.2s ease",
     }} onClick={onOpen}>
 
       {/* Cover — ALWAYS exactly CARD_H pixels tall */}
       <div style={{
-        height: CARD_H,        // ← fixed height, never changes
+        height: "100%",       // ← fixed height, never changes
         borderRadius:14,
         overflow:"hidden",     // ← clips thumbnail to this box
         background:`linear-gradient(160deg,hsl(${hue},58%,26%),hsl(${hue+30},48%,15%))`,
