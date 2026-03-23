@@ -288,6 +288,7 @@ export default function App() {
   const folderInputRef = useRef(null);
   const containerRef = useRef(null);
   const pinchRef = useRef({ active:false, startDist:0, startZoom:1 });
+  const swipeRef = useRef({ startX: 0, startY: 0, isSwiping: false });
   const controlsTimer = useRef(null);
   const utterRef = useRef(null);
   const restoredRef = useRef(false);
@@ -682,14 +683,27 @@ ctx.drawImage(tempCanvas, 0, 0);
   // Old problem: every touch move fired setZoom → triggered re-render → lag
   // Fix: accumulate zoom in a ref during gesture, only setZoom on touchend
   const liveZoomRef = useRef(zoom); // tracks zoom during gesture without re-renders
-  const onTS = e => {
-    if (e.touches.length !== 2) return;
-    e.preventDefault();
-    const dx = e.touches[0].clientX - e.touches[1].clientX;
-    const dy = e.touches[0].clientY - e.touches[1].clientY;
-    pinchRef.current = { active:true, startDist:Math.hypot(dx,dy), startZoom:zoom };
-    liveZoomRef.current = zoom;
+ const onTS = e => {
+  if (e.touches.length === 1) {
+    swipeRef.current = {
+      startX: e.touches[0].clientX,
+      startY: e.touches[0].clientY,
+      isSwiping: true
+    };
+  }
+
+  if (e.touches.length !== 2) return;
+  e.preventDefault();
+
+  const dx = e.touches[0].clientX - e.touches[1].clientX;
+  const dy = e.touches[0].clientY - e.touches[1].clientY;
+
+  pinchRef.current = {
+    active: true,
+    startDist: Math.hypot(dx, dy),
+    startZoom: liveZoomRef.current
   };
+};
   const onTM = e => {
     if (!pinchRef.current.active || e.touches.length !== 2) return;
     e.preventDefault();
@@ -706,7 +720,21 @@ ctx.drawImage(tempCanvas, 0, 0);
       canvasRef.current.parentElement.style.transformOrigin = "top center";
     }
   };
-  const onTE = () => {
+  const onTE = () => { 
+     if (swipeRef.current.isSwiping) {
+    const endX = e.changedTouches[0].clientX;
+    const diffX = endX - swipeRef.current.startX;
+    const threshold = 50; // pixels
+
+    if (diffX < -threshold && currentPage < numPages) {
+      setCurrentPage(p => p + 1); // swipe left → next page
+    }
+    if (diffX > threshold && currentPage > 1) {
+      setCurrentPage(p => p - 1); // swipe right → previous page
+    }
+
+    swipeRef.current.isSwiping = false;
+  }
     if (!pinchRef.current.active) return;
     pinchRef.current.active = false;
     // Remove temporary CSS transform
@@ -1387,6 +1415,7 @@ ctx.drawImage(tempCanvas, 0, 0);
             )}
 
             <div style={{ width:"100%",
+              transition: "transform 0.25s ease", // 🔥 animation
               boxShadow:d
                 ?"0 0 40px rgba(37,99,235,0.12),0 8px 40px rgba(0,0,0,0.7)"
                 :"0 4px 24px rgba(0,0,0,0.15)" }}>
