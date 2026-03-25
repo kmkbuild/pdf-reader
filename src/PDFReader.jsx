@@ -282,26 +282,27 @@ export default function App() {
   const [voiceSpeed, setVoiceSpeed] = useState(1);
   const [voiceProgress, setVoiceProgress] = useState(0);
 
-  const canvasRef = useRef(null);
-  const canvasWrapperRef = useRef(null);   // wrapper div — receives CSS transforms
-  const renderTaskRef = useRef(null);
-  const fileInputRef = useRef(null);
+  const canvasRef      = useRef(null);
+  const wrapRef        = useRef(null);   // wrapper that receives CSS transforms
+  const renderTaskRef  = useRef(null);
+  const fileInputRef   = useRef(null);
   const folderInputRef = useRef(null);
-  const containerRef = useRef(null);
-  // pinch/swipe state — all in refs so non-passive handlers read latest values
-  const pinchRef    = useRef({ active:false, startDist:0, startZoom:1, cx:0, cy:0 });
-  const swipeRef    = useRef({ active:false, startX:0, startY:0, curX:0, cancelled:false });
-  const swipeLockRef = useRef(false);  // blocks swipe for 350ms after pinch ends
-  const liveZoomRef = useRef(1);       // zoom value during live pinch gesture
-  // Mirrors of React state — safe to read inside non-passive event handlers
-  const currentPageRef = useRef(1);
-  const numPagesRef    = useRef(0);
-  const zoomRef        = useRef(1);
-  const pdfDocRef2     = useRef(null); // separate from the pdfDocRef used for new-doc detection
-  // After pinch ends we need to re-centre scroll once canvas re-renders at new size
-  const pendingScrollRef = useRef(null); // { fracX, fracY, cx, cy }
+  const containerRef   = useRef(null);
+  const pinchRef  = useRef({ active:false, startDist:0, startZoom:1, ox:0, oy:0, sx:0, sy:0 });
+  const swipeRef  = useRef({ active:false, startX:0, startY:0, curX:0, dead:false });
+  const swipeLock = useRef(false);   // true for 350ms after pinch ends
+  const liveZoom  = useRef(1);       // zoom during active pinch — no re-render
+  // Mirror refs — safe to read inside non-passive DOM handlers
+  const zoomRef   = useRef(1);
+  const pageRef   = useRef(1);
+  const totalRef  = useRef(0);
+  const docRef    = useRef(null);
+  // Trampoline refs — always point to latest closure, registered once
+  const onTSRef   = useRef(null);
+  const onTMRef   = useRef(null);
+  const onTERef   = useRef(null);
   const controlsTimer = useRef(null);
-  const utterRef = useRef(null);
+  const utterRef  = useRef(null);
   const restoredRef = useRef(false);
 
   // Refs for back button
@@ -311,11 +312,11 @@ export default function App() {
   useEffect(() => { screenRef.current = screen; }, [screen]);
   useEffect(() => { activePanelRef.current = activePanel; }, [activePanel]);
   useEffect(() => { drawerRef.current = drawerOpen; }, [drawerOpen]);
-  // Keep plain-JS refs in sync with React state for use in non-passive handlers
-  useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
-  useEffect(() => { numPagesRef.current = numPages; }, [numPages]);
-  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
-  useEffect(() => { pdfDocRef2.current = pdfDoc; }, [pdfDoc]);
+  // Keep mirror refs current so non-passive handlers never read stale state
+  useEffect(() => { zoomRef.current  = zoom; },        [zoom]);
+  useEffect(() => { pageRef.current  = currentPage; }, [currentPage]);
+  useEffect(() => { totalRef.current = numPages; },    [numPages]);
+  useEffect(() => { docRef.current   = pdfDoc; },      [pdfDoc]);
 
   // ── BOOT ────────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -387,6 +388,11 @@ export default function App() {
     if (!restoredRef.current) return;
     Object.entries(notes).forEach(([n,p]) => dbSaveNotes(n,p).catch(()=>{}));
   }, [notes]);
+  useEffect(() => {
+  if (pdfDoc) {
+    renderPage(pdfDoc, currentPage);
+  }
+}, [currentPage, zoom]);
   useEffect(() => { if (restoredRef.current) dbSet("lastRead",lastRead).catch(()=>{}); }, [lastRead]);
   useEffect(() => { if (restoredRef.current) dbSet("recentBooks",recentBooks).catch(()=>{}); }, [recentBooks]);
   useEffect(() => { if (restoredRef.current) dbSet("dark",dark).catch(()=>{}); }, [dark]);
@@ -406,33 +412,13 @@ export default function App() {
       if (!activePanelRef.current) setShowControls(false);
     }, 4000);
   };
-
-  // When reader screen becomes visible, ensure canvas is painted
-  useEffect(() => {
-    if (screen === "reader" && pdfDoc) {
-      setTimeout(() => renderPage(pdfDoc, currentPage, zoomRef.current), 120);
-    }
-  }, [screen, pdfDoc]);
-
-  // After zoom changes: re-render at new scale, then restore scroll so the
-  // pinch focal point stays under the user's fingers
-  useEffect(() => {
-    if (!pdfDoc) return;
-    const pending = pendingScrollRef.current;
-    // Render at new zoom
-    renderPage(pdfDoc, currentPage, zoom).then(() => {
-      if (pending && containerRef.current && canvasRef.current) {
-        const { fracX, fracY, cx, cy } = pending;
-        pendingScrollRef.current = null;
-        const c = containerRef.current;
-        const cvs = canvasRef.current;
-        requestAnimationFrame(() => {
-          c.scrollLeft = Math.max(0, fracX * cvs.offsetWidth  - cx);
-          c.scrollTop  = Math.max(0, fracY * cvs.offsetHeight - cy);
-        });
-      }
-    });
-  }, [zoom]);
+useEffect(() => {
+  if (screen === "reader" && pdfDoc) {
+    setTimeout(() => {
+      renderPage(pdfDoc, currentPage);
+    }, 100);
+  }
+}, [screen, pdfDoc]);
   // ── FIX ii: Generate and cache thumbnail for a book ──────────────────────────
   const ensureThumb = useCallback(async (name, buf) => {
     if (thumbs[name]) return; // already have it
@@ -632,8 +618,8 @@ export default function App() {
   };
 
   // ── RENDER PAGE ──────────────────────────────────────────────────────────────
-  // scaleOvr === undefined  →  fit-to-width and call setZoom(fit)
-  // scaleOvr === number     →  render at that exact scale, do NOT change zoom state
+  // scaleOvr === undefined  →  fit to screen width and setZoom(fit)
+  // scaleOvr === number     →  render at that exact scale, don't touch zoom state
   const renderPage = useCallback(async (doc, pageNum, scaleOvr) => {
     if (!canvasRef.current || !doc) return;
     if (renderTaskRef.current) { try { renderTaskRef.current.cancel(); } catch {} }
@@ -649,26 +635,25 @@ export default function App() {
 
       const naturalVP = page.getViewport({ scale: 1 });
       const fit   = availW / naturalVP.width;
-      const scale = scaleOvr !== undefined ? scaleOvr : fit;
+      const scale = (scaleOvr !== undefined) ? scaleOvr : fit;
       const dpr   = window.devicePixelRatio || 1;
       const vp    = page.getViewport({ scale });
       const canvas = canvasRef.current;
       if (!canvas) return;
 
-      // Double-buffer: render into temp canvas, then blit — eliminates flash
-      const tmp    = document.createElement("canvas");
-      const tmpCtx = tmp.getContext("2d");
+      // Double-buffer: render into temp canvas then blit — zero flicker
+      const tmp = document.createElement("canvas");
+      const tctx = tmp.getContext("2d");
       tmp.width  = Math.floor(vp.width  * dpr);
       tmp.height = Math.floor(vp.height * dpr);
-      tmpCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      tmpCtx.fillStyle = "#ffffff";
-      tmpCtx.fillRect(0, 0, vp.width, vp.height);
-
-      const task = page.render({ canvasContext: tmpCtx, viewport: vp, intent: "display" });
+      tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      tctx.fillStyle = "#fff";
+      tctx.fillRect(0, 0, vp.width, vp.height);
+      const task = page.render({ canvasContext: tctx, viewport: vp, intent: "display" });
       renderTaskRef.current = task;
       await task.promise;
 
-      // Blit to real canvas — single synchronous draw, no flicker
+      // Single synchronous blit — no flash
       const ctx = canvas.getContext("2d");
       canvas.width  = tmp.width;
       canvas.height = tmp.height;
@@ -681,175 +666,185 @@ export default function App() {
       if (scaleOvr === undefined) setZoom(fit);
     } catch (e) {
       if (e?.name !== "RenderingCancelledException") console.error("Render:", e);
-    } finally {
-      setRendering(false);
-    }
+    } finally { setRendering(false); }
   }, []);
 
-  // New book → fit-to-screen; page change → preserve current zoom
+  // Track which doc is "current" so page changes preserve zoom, new book fits
   const lastDocRef = useRef(null);
   useEffect(() => {
     if (!pdfDoc) return;
-    if (pdfDoc !== lastDocRef.current) {
-      lastDocRef.current = pdfDoc;
-      renderPage(pdfDoc, currentPage, undefined); // fit new book
-    } else {
-      renderPage(pdfDoc, currentPage, zoomRef.current); // keep zoom on page turn
-    }
+    const isNew = pdfDoc !== lastDocRef.current;
+    lastDocRef.current = pdfDoc;
+    // New book → fit to width (undefined resets zoom); page turn → keep current zoom
+    renderPage(pdfDoc, currentPage, isNew ? undefined : zoomRef.current);
   }, [pdfDoc, currentPage]);
 
-  // ══ TOUCH SYSTEM — non-passive listeners so preventDefault works ═════════════
+  // +/- button or programmatic zoom change → re-render at new scale
+  const ztRef = useRef(null);
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-
-    const dist2 = (a,b) => Math.hypot(a.clientX-b.clientX, a.clientY-b.clientY);
-    const midPt = (a,b) => ({ x:(a.clientX+b.clientX)/2, y:(a.clientY+b.clientY)/2 });
-    const W = () => window.innerWidth;
-    const wrap = () => canvasWrapperRef.current;
-    const clearWrap = () => {
-      const w = wrap(); if (!w) return;
-      w.style.transition = w.style.transform = w.style.transformOrigin = w.style.willChange = "";
-    };
-
-    // ── touchstart ─────────────────────────────────────────────────────────────
-    const onTS = (e) => {
-      if (e.touches.length === 2) {
-        swipeRef.current.active = false;
-        clearWrap();
-        const t1=e.touches[0], t2=e.touches[1];
-        const rect = el.getBoundingClientRect();
-        const m = midPt(t1,t2);
-        pinchRef.current = {
-          active: true,
-          startDist: dist2(t1,t2),
-          startZoom: zoomRef.current,
-          cx: m.x - rect.left,
-          cy: m.y - rect.top,
-          scrollX: el.scrollLeft,
-          scrollY: el.scrollTop,
-        };
-        liveZoomRef.current = zoomRef.current;
-        e.preventDefault();
-        return;
-      }
-      if (e.touches.length === 1) {
-        const atFit = zoomRef.current <= 1.02;
-        swipeRef.current = {
-          active:    atFit && !swipeLockRef.current,
-          startX:    e.touches[0].clientX,
-          startY:    e.touches[0].clientY,
-          curX:      e.touches[0].clientX,
-          cancelled: false,
-        };
-      }
-    };
-
-    // ── touchmove ──────────────────────────────────────────────────────────────
-    const onTM = (e) => {
-      if (pinchRef.current.active && e.touches.length === 2) {
-        e.preventDefault();
-        const d = dist2(e.touches[0], e.touches[1]);
-        const ratio  = d / pinchRef.current.startDist;
-        const eased  = 1 + (ratio - 1) * 0.96;
-        const nz     = Math.max(0.5, Math.min(4, pinchRef.current.startZoom * eased));
-        liveZoomRef.current = nz;
-        const sf = nz / pinchRef.current.startZoom;
-        const w = wrap();
-        if (w) {
-          // Transform origin = pinch focal point in content-scroll space
-          const ox = pinchRef.current.cx + pinchRef.current.scrollX;
-          const oy = pinchRef.current.cy + pinchRef.current.scrollY;
-          w.style.transformOrigin = `${ox}px ${oy}px`;
-          w.style.transform       = `scale(${sf})`;
-          w.style.transition      = "none";
-          w.style.willChange      = "transform";
-        }
-        // Scroll compensation keeps focal point fixed under fingers
-        el.scrollLeft = (pinchRef.current.scrollX + pinchRef.current.cx) * sf - pinchRef.current.cx;
-        el.scrollTop  = (pinchRef.current.scrollY + pinchRef.current.cy) * sf - pinchRef.current.cy;
-        return;
-      }
-      if (!swipeRef.current.active || e.touches.length !== 1) return;
-      const dx = e.touches[0].clientX - swipeRef.current.startX;
-      const dy = Math.abs(e.touches[0].clientY - swipeRef.current.startY);
-      if (!swipeRef.current.cancelled && dy > Math.abs(dx)*1.2 && dy > 8) {
-        swipeRef.current.cancelled = true;
-        const w = wrap();
-        if (w) { w.style.transition = "transform 0.18s ease"; w.style.transform = "translateX(0)"; }
-        return;
-      }
-      if (swipeRef.current.cancelled) return;
-      e.preventDefault();
-      swipeRef.current.curX = e.touches[0].clientX;
-      const page = currentPageRef.current, total = numPagesRef.current;
-      let off = dx;
-      if ((dx>0 && page===1)||(dx<0 && page===total)) off = dx*0.22;
-      const w = wrap();
-      if (w) { w.style.transition = "none"; w.style.transform = `translateX(${off}px)`; }
-    };
-
-    // ── touchend ───────────────────────────────────────────────────────────────
-    const onTE = () => {
-      if (pinchRef.current.active) {
-        pinchRef.current.active = false;
-        const finalZoom = parseFloat(liveZoomRef.current.toFixed(3));
-        const cvs = canvasRef.current;
-        if (cvs && el) {
-          const cw = cvs.offsetWidth  || el.clientWidth;
-          const ch = cvs.offsetHeight || 600;
-          const cx = pinchRef.current.cx, cy = pinchRef.current.cy;
-          pendingScrollRef.current = {
-            fracX: (el.scrollLeft + cx) / cw,
-            fracY: (el.scrollTop  + cy) / ch,
-            cx, cy,
-          };
-        }
-        const w = wrap();
-        if (w) { w.style.transform = ""; w.style.transformOrigin = ""; w.style.transition = "none"; w.style.willChange = ""; }
-        setZoom(finalZoom);
-        swipeLockRef.current = true;
-        setTimeout(() => { swipeLockRef.current = false; }, 350);
-        return;
-      }
-      if (!swipeRef.current.active) return;
-      swipeRef.current.active = false;
-      if (swipeRef.current.cancelled) return;
-      const dx    = swipeRef.current.curX - swipeRef.current.startX;
-      const page  = currentPageRef.current, total = numPagesRef.current;
-      const THRESH = W() * 0.28;
-      const w = wrap();
-      const goNext = dx < -THRESH && page < total;
-      const goPrev = dx >  THRESH && page > 1;
-      if (goNext || goPrev) {
-        const dir = goNext ? -W() : W();
-        if (w) { w.style.transition = "transform 0.26s cubic-bezier(0.4,0,0.2,1)"; w.style.transform = `translateX(${dir}px)`; }
-        setTimeout(() => {
-          goToPage(goNext ? page+1 : page-1);
-          if (w) { w.style.transition = "none"; w.style.transform = ""; }
-        }, 250);
-      } else {
-        if (w) { w.style.transition = "transform 0.3s cubic-bezier(0.34,1.56,0.64,1)"; w.style.transform = "translateX(0)"; }
-      }
-    };
-
-    el.addEventListener("touchstart", onTS, { passive:false });
-    el.addEventListener("touchmove",  onTM, { passive:false });
-    el.addEventListener("touchend",   onTE, { passive:false });
-    return () => {
-      el.removeEventListener("touchstart", onTS);
-      el.removeEventListener("touchmove",  onTM);
-      el.removeEventListener("touchend",   onTE);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!pdfDoc) return;
+    clearTimeout(ztRef.current);
+    ztRef.current = setTimeout(() => renderPage(pdfDoc, currentPage, zoom), 120);
+  }, [zoom]);
 
   // ── PAGE NAV ─────────────────────────────────────────────────────────────────
   const goToPage = n => {
-    const p=Math.max(1,Math.min(n,numPages));
+    const p = Math.max(1, Math.min(n, numPages));
     setCurrentPage(p);
-    if (currentBook) setLastRead(prev=>({...prev,[currentBook.name]:p}));
+    if (currentBook) setLastRead(prev => ({ ...prev, [currentBook.name]: p }));
   };
+  // Stable ref so touch handlers (registered once) can always call latest goToPage
+  const goToPageRef = useRef(goToPage);
+  useEffect(() => { goToPageRef.current = goToPage; });
+
+  // ── TOUCH SYSTEM ─────────────────────────────────────────────────────────────
+  // Strategy: store handlers in refs (fresh closure every render), register
+  // stable DOM listeners with { passive:false } so preventDefault works on mobile.
+  // Re-register whenever screen changes (reader DOM mounts/unmounts).
+
+  // These run every render — always have fresh state in their closures
+  onTSRef.current = (e) => {
+    if (e.touches.length === 2) {
+      // Kill any pending swipe
+      swipeRef.current.active = false;
+      clearWrap();
+      const t0 = e.touches[0], t1 = e.touches[1];
+      const rect = containerRef.current.getBoundingClientRect();
+      const mx = (t0.clientX + t1.clientX) / 2 - rect.left;
+      const my = (t0.clientY + t1.clientY) / 2 - rect.top;
+      const el = containerRef.current;
+      pinchRef.current = {
+        active: true,
+        startDist: Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY),
+        startZoom: zoomRef.current,
+        // focal point in content coordinates (scroll + viewport offset)
+        ox: mx + el.scrollLeft,
+        oy: my + el.scrollTop,
+        // viewport offset (to scroll-compensate)
+        vx: mx, vy: my,
+        sx: el.scrollLeft, sy: el.scrollTop,
+      };
+      liveZoom.current = zoomRef.current;
+      e.preventDefault();
+      return;
+    }
+    if (e.touches.length === 1) {
+      const atFit = zoomRef.current <= 1.05;
+      swipeRef.current = {
+        active: atFit && !swipeLock.current,
+        startX: e.touches[0].clientX,
+        startY: e.touches[0].clientY,
+        curX:   e.touches[0].clientX,
+        dead:   false,
+      };
+    }
+  };
+
+  onTMRef.current = (e) => {
+    // ── PINCH ──────────────────────────────────────────────────────────────────
+    if (pinchRef.current.active && e.touches.length === 2) {
+      e.preventDefault();
+      const t0 = e.touches[0], t1 = e.touches[1];
+      const d = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
+      const ratio  = d / pinchRef.current.startDist;
+      const nz     = Math.max(0.5, Math.min(4, pinchRef.current.startZoom * ratio));
+      liveZoom.current = nz;
+      const sf = nz / pinchRef.current.startZoom;
+      const w = wrapRef.current;
+      if (w) {
+        // transformOrigin = pinch focal point in wrapper coordinate space
+        w.style.transformOrigin = `${pinchRef.current.ox}px ${pinchRef.current.oy}px`;
+        w.style.transform       = `scale(${sf})`;
+        w.style.transition      = "none";
+      }
+      // Scroll-compensate so focal point stays under fingers
+      const el = containerRef.current;
+      if (el) {
+        el.scrollLeft = pinchRef.current.sx + pinchRef.current.vx * (sf - 1);
+        el.scrollTop  = pinchRef.current.sy + pinchRef.current.vy * (sf - 1);
+      }
+      return;
+    }
+    // ── SWIPE ──────────────────────────────────────────────────────────────────
+    if (!swipeRef.current.active || e.touches.length !== 1) return;
+    const dx = e.touches[0].clientX - swipeRef.current.startX;
+    const dy = Math.abs(e.touches[0].clientY - swipeRef.current.startY);
+    // Vertical gesture → cancel swipe, let browser scroll
+    if (!swipeRef.current.dead && dy > Math.abs(dx) * 1.3 && dy > 10) {
+      swipeRef.current.dead = true;
+      const w = wrapRef.current;
+      if (w) { w.style.transition = "transform 0.18s ease"; w.style.transform = ""; }
+      return;
+    }
+    if (swipeRef.current.dead) return;
+    e.preventDefault(); // block scroll during confirmed horizontal swipe
+    swipeRef.current.curX = e.touches[0].clientX;
+    const page = pageRef.current, total = totalRef.current;
+    // Rubber-band at edges
+    let off = dx;
+    if ((dx > 0 && page === 1) || (dx < 0 && page === total)) off = dx * 0.2;
+    const w = wrapRef.current;
+    if (w) { w.style.transition = "none"; w.style.transform = `translateX(${off}px)`; }
+  };
+
+  onTERef.current = () => {
+    // ── PINCH END ──────────────────────────────────────────────────────────────
+    if (pinchRef.current.active) {
+      pinchRef.current.active = false;
+      clearWrap();
+      const finalZoom = parseFloat(liveZoom.current.toFixed(3));
+      setZoom(finalZoom);
+      // Block swipe for 350ms — lifting pinch fingers must never flip a page
+      swipeLock.current = true;
+      setTimeout(() => { swipeLock.current = false; }, 350);
+      return;
+    }
+    // ── SWIPE END ──────────────────────────────────────────────────────────────
+    if (!swipeRef.current.active) return;
+    swipeRef.current.active = false;
+    if (swipeRef.current.dead) return;
+    const dx    = swipeRef.current.curX - swipeRef.current.startX;
+    const page  = pageRef.current, total = totalRef.current;
+    const THRESH = window.innerWidth * 0.28;
+    const w = wrapRef.current;
+    const goNext = dx < -THRESH && page < total;
+    const goPrev = dx >  THRESH && page > 1;
+    if (goNext || goPrev) {
+      const dir = goNext ? -window.innerWidth : window.innerWidth;
+      if (w) { w.style.transition = "transform 0.25s cubic-bezier(0.4,0,0.2,1)"; w.style.transform = `translateX(${dir}px)`; }
+      setTimeout(() => {
+        goToPageRef.current(goNext ? page + 1 : page - 1);
+        if (w) { w.style.transition = "none"; w.style.transform = ""; }
+      }, 240);
+    } else {
+      // Spring back
+      if (w) { w.style.transition = "transform 0.32s cubic-bezier(0.34,1.56,0.64,1)"; w.style.transform = ""; }
+    }
+  };
+
+  // clearWrap helper — defined as a stable function (doesn't need to be inside effect)
+  function clearWrap() {
+    const w = wrapRef.current; if (!w) return;
+    w.style.transition = w.style.transform = w.style.transformOrigin = "";
+  }
+
+  // Register non-passive DOM listeners whenever the reader screen (re)mounts
+  useEffect(() => {
+    if (screen !== "reader") return;
+    const el = containerRef.current;
+    if (!el) return;
+    const ts = (e) => onTSRef.current(e);
+    const tm = (e) => onTMRef.current(e);
+    const te = ()  => onTERef.current();
+    el.addEventListener("touchstart", ts, { passive: false });
+    el.addEventListener("touchmove",  tm, { passive: false });
+    el.addEventListener("touchend",   te, { passive: false });
+    return () => {
+      el.removeEventListener("touchstart", ts);
+      el.removeEventListener("touchmove",  tm);
+      el.removeEventListener("touchend",   te);
+    };
+  }, [screen]);
   const navToc = async item => {
     if (!pdfDoc||!item.dest) return;
     try {
@@ -1483,24 +1478,22 @@ export default function App() {
               </div>
               <div style={{ fontSize:10, color:txM }}>Page {currentPage} of {numPages}</div>
             </div>
-            <button onClick={()=>setZoom(z=>parseFloat(Math.max(0.5, z*0.85).toFixed(3)))}
+            <button onClick={()=>setZoom(z=>parseFloat(Math.max(0.5,z/1.25).toFixed(3)))}
               style={glassBtn()}>−</button>
-            <span style={{ fontSize:10, color:txM, minWidth:38, textAlign:"center" }}>
+            <span style={{ fontSize:10, color:txM, minWidth:36, textAlign:"center" }}>
               {Math.round(zoom*100)}%
             </span>
-            <button onClick={()=>setZoom(z=>parseFloat(Math.min(4, z*1.18).toFixed(3)))}
+            <button onClick={()=>setZoom(z=>parseFloat(Math.min(4,z*1.25).toFixed(3)))}
               style={glassBtn()}>+</button>
           </div>
 
-          {/* PDF canvas area — overflow:auto both axes so panning works when zoomed */}
+          {/* PDF canvas area — overflow:auto BOTH axes so panning works when zoomed */}
           <div ref={containerRef}
             onClick={()=>{ touchControls(); if(activePanelRef.current) setActivePanel(null); }}
             style={{ flex:1, overflow:"auto",
               WebkitOverflowScrolling:"touch",
               background:d?"linear-gradient(180deg,#0f0f1a,#141428)":"#e8edf5",
-              paddingTop:8, paddingBottom:8,
-              /* hide scrollbars but keep scrollable */
-              scrollbarWidth:"none", msOverflowStyle:"none" }}>
+              paddingTop:8, paddingBottom:8 }}>
 
             {rendering && (
               <div style={{ position:"fixed", top:"50%", left:"50%",
@@ -1512,15 +1505,13 @@ export default function App() {
               </div>
             )}
 
-            {/* canvasWrapperRef receives CSS transforms during pinch/swipe */}
-            <div ref={canvasWrapperRef}
-              style={{ display:"flex", justifyContent:"center",
-                minWidth:"100%", minHeight:"100%",
-                willChange:"transform",
+            {/* wrapRef receives CSS scale (pinch) and translateX (swipe) */}
+            <div ref={wrapRef}
+              style={{ display:"flex", justifyContent:"center", minWidth:"100%",
                 boxShadow:d
                   ?"0 0 40px rgba(37,99,235,0.12),0 8px 40px rgba(0,0,0,0.7)"
                   :"0 4px 24px rgba(0,0,0,0.15)" }}>
-              <canvas ref={canvasRef} style={{ display:"block" }} />
+              <canvas ref={canvasRef} style={{ display:"block", maxWidth:"100%" }} />
             </div>
 
             {bNotes[currentPage] && (
@@ -1939,7 +1930,6 @@ export default function App() {
 
       <style>{`
         @keyframes fadeUp{from{opacity:0;transform:translateX(-50%) translateY(12px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
-        [data-scroll-hide]::-webkit-scrollbar{display:none}
         @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
         @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
         @keyframes wave{0%{transform:scaleY(.5)}100%{transform:scaleY(1.5)}}
